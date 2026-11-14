@@ -3,7 +3,7 @@
 Your git changes in a [Rex](https://superlogical.com/rex) pane, right next to
 your terminal: a tree of the files that changed and a colored diff of the
 selected file. Review them, mark what you've read, commit, and handle your
-branches (fetch, checkout, pull, push, merge, delete, history) without leaving
+branches (fetch, create, checkout, pull, push, merge, delete, history) without leaving
 the panel.
 
 ```
@@ -32,7 +32,7 @@ The panel has three screens:
 
 - **Changes** (`1`): the tree and the diff above. Review, stage, and commit.
 - **Branches** (`2`): your local branches, plus remote ones you don't have yet.
-  Fetch, check out, pull, push, merge, and delete.
+  Fetch, create, check out, pull, push, merge, and delete.
 - **History** (Enter on a branch): that branch's commits.
 
 In a wide pane (full screen or zoomed) the Changes screen puts the tree on the
@@ -55,7 +55,8 @@ left and the diff on the right.
 - **Branches.** Press `2` for a list of your local branches with how far each
   one is ahead/behind its upstream, followed by remote branches you haven't
   checked out yet. `f` fetches, space checks one out, `p` pulls it,
-  Shift+P pushes it, `m` merges it into the branch you're on, `d` deletes it,
+  Shift+P pushes it, `m` pulls it into the branch you're on, `n` starts a new
+  branch from it, `d` deletes it,
   and Enter shows its commit history.
 - **A diff that reads well.** Line numbers, full-width green/red backgrounds,
   syntax colors, and the exact words that changed highlighted inside each line.
@@ -213,7 +214,7 @@ Below your local branches come the remote ones that no local branch tracks
 yet, dimmed and marked `remote` (`origin/pr/new-screen`). Space on one creates
 a local branch that tracks it and switches to it, which is how you check out
 someone's pull request: `f`, find the branch, space. Enter shows its history
-and `m` merges it into your branch; pull, push, and delete ask you to check it
+and `m` pulls it into your branch; pull, push, and delete ask you to check it
 out first.
 
 | Key | Action |
@@ -223,7 +224,8 @@ out first.
 | `Enter` | Show the branch's commit history |
 | `p` | Pull the branch |
 | `P` (Shift+P) | Push the branch |
-| `m` | Merge the branch into the one you're on (updating it from its upstream first) |
+| `m` | Pull the branch into the one you're on (`git pull origin <branch>`) |
+| `n` | Create a new branch from it and switch to it |
 | `d` | Delete the local branch, after `y` |
 | `D` (Shift+D) | Delete it even if it has unmerged commits, after `y` |
 | `f` | Fetch from all remotes, dropping remote branches deleted there (`git fetch --all --prune`) |
@@ -236,18 +238,25 @@ don't have, the push is rejected and the footer tells you to pull first.
 Checkout refuses when your uncommitted changes would be overwritten.
 
 Pull on the branch you're on runs `git pull`, so it merges or rebases as your
-git config says. On any other branch it can only fast-forward (merging needs a
+git config says (`pull.rebase`). When the repository doesn't say, it merges
+(`--no-rebase`) instead of stopping on diverged branches; `m` does the same. On any other branch it can only fast-forward (merging needs a
 checkout); if that branch has diverged, the footer asks you to check it out
 first. Problems show up in the footer in plain words: merge conflicts (fix them
-in the Changes screen, then commit), diverged branches with no `pull.rebase`
-setting, or local changes in the way.
+in the Changes screen, then commit) or local changes in the way.
 
-`m` brings another branch into the one you're on, the usual "update my feature
-branch with `main`": on `feature/x`, press `m` on `main`. It first
-fast-forwards `main` from `origin/main` (like `p`), then runs `git merge main`.
-If your local `main` has diverged from `origin/main` it stops before merging and
-tells you, so you never merge a stale `main` by accident. Conflicts are reported
+`m` brings another branch into the one you're on, the usual "update my
+branch with `qa`": on `feature/x`, press `m` on `qa` (or on `origin/qa`). It
+runs `git pull origin qa` on your branch, so it never touches your local `qa`
+and works even when `qa` is checked out in another worktree. A branch with no
+remote side is merged as it is (`git merge <branch>`). Conflicts are reported
 the same way as with pull.
+
+`n` creates a branch from the selected one and switches to it: type the name in
+the footer (spaces become `-`) and press Enter. If the selected branch has a
+remote side, it's fetched first and the new branch starts from it, so a branch
+made from `qa` starts from the latest `origin/qa` even when your local `qa` is
+behind. The new branch doesn't track `qa`; its first push (`P`) sets its own
+upstream.
 
 `d` deletes the local branch after you confirm with `y` (`git branch -d`). Git
 refuses when the branch has commits that aren't on its upstream or on the
@@ -322,7 +331,8 @@ the way of your own `git` commands. The only writes are the ones you ask for:
 | Branches | `f` | `git fetch --all --prune` |
 | Branches | `p` | `git pull` on the current branch; `git fetch <remote> <branch>:<branch>` (fast-forward only) on any other |
 | Branches | `P` | `git push`, or `git push -u origin <branch>` the first time |
-| Branches | `m` | Fast-forward the branch from its upstream, then `git merge <branch>` |
+| Branches | `m` | `git pull <remote> <branch>` into the current branch (`git merge <branch>` for a branch with no remote side) |
+| Branches | `n`, a name, then Enter | `git fetch <remote> <branch>`, then `git switch --no-track -c <name> <remote>/<branch>` |
 | Branches | `d` / `D`, then `y` | `git branch -d <branch>` / `git branch -D <branch>` |
 
 If the panel ever crashes, the error is written to
