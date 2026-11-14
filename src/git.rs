@@ -98,8 +98,13 @@ pub enum Job {
     Push { name: String },
     /// Pull the branch from its upstream.
     Pull { name: String },
-    /// Update the branch from its upstream, then merge it into the current one.
-    Merge { name: String },
+    /// Bring a branch into the current one: `git pull <remote> <branch>` when
+    /// it has a remote side (`remote` marks an `origin/x` row), else
+    /// `git merge <branch>`.
+    PullInto { name: String, remote: bool },
+    /// Create a branch from `from` (its remote side, freshly fetched, when it
+    /// has one) and switch to it.
+    NewBranch { name: String, from: String, from_remote: bool },
     /// The commit history of a local branch.
     History { branch: String },
     /// `git branch -d` (or `-D` with `force`).
@@ -170,7 +175,8 @@ pub fn run_worker(cwd: PathBuf, rx: Receiver<Job>, tx: Sender<Msg>) {
                 | Job::Fetch
                 | Job::Push { .. }
                 | Job::Pull { .. }
-                | Job::Merge { .. }
+                | Job::PullInto { .. }
+                | Job::NewBranch { .. }
                 | Job::DeleteBranch { .. } => {
                     actions.push(job)
                 }
@@ -222,7 +228,8 @@ pub fn run_worker(cwd: PathBuf, rx: Receiver<Job>, tx: Sender<Msg>) {
                 Job::DeleteBranch { name, force } => delete_branch(dir, &name, force),
                 Job::Push { name } => push(dir, &name, &tx),
                 Job::Pull { name } => pull(dir, &name, &tx),
-                Job::Merge { name } => merge_into_current(dir, &name, &tx),
+                Job::PullInto { name, remote } => pull_into_current(dir, &name, remote, &tx),
+                Job::NewBranch { name, from, from_remote } => new_branch(dir, &name, &from, from_remote, &tx),
                 _ => continue,
             };
             let _ = tx.send(Msg::Done(done));
@@ -503,7 +510,9 @@ fn pull(dir: &Path, name: &str, tx: &Sender<Msg>) -> Result<String, String> {
     let _ = tx.send(Msg::Progress(format!("Pulling {target} into {name}…")));
 
     if current.as_deref() == Some(name) {
-        let out = run_git(dir, &["pull"])?;
+        let mut args = vec!["pull"];
+        args.extend(merge_by_default(dir));
+        let out = run_git(dir, &args)?;
         if out.contains("Already up to date") {
             return Ok(format!("{name} is already up to date"));
         }
@@ -525,34 +534,75 @@ fn fast_forward(dir: &Path, name: &str, remote: &str, merge: &str) -> Result<(),
     })
 }
 
-/// Brings `name` into the branch you're on: first updates `name` from its
-/// upstream (when it has one), then `git merge name`.
-fn merge_into_current(dir: &Path, name: &str, tx: &Sender<Msg>) -> Result<String, String> {
+/// `--no-rebase` when the repository doesn't say how `git pull` should join
+/// diverged branches (no `pull.rebase`), so a pull merges, like it always
+/// did, instead of stopping. A configured `pull.rebase` is left to git.
+fn merge_by_default(dir: &Path) -> Option<&'static str> {
+    run_git(dir, &["config", "--get", "pull.rebase"]).is_err().then_some("--no-rebase")
+}
+
+/// The remote side of a branch, as (remote, branch name there): for an
+/// `origin/qa` row, `("origin", "qa")`; for a local branch, its upstream.
+fn remote_side(dir: &Path, name: &str, remote_row: bool) -> Option<(String, String)> {
+    if remote_row {
+        let (remote, branch) = name.split_once('/')?;
+        return Some((remote.to_string(), branch.to_string()));
+    }
+    let config = |key: &str| run_git(dir, &["config", "--get", &format!("branch.{name}.{key}")]).ok();
+    let (remote, merge) = (config("remote")?, config("merge")?);
+    Some((remote, merge.trim_start_matches("refs/heads/").to_string()))
+}
+
+/// Brings `name` into the branch you're on, the usual "update my branch with
+/// qa": `git pull origin qa`. It never touches the local `qa`, so it works
+/// even when `qa` is checked out in another worktree. A branch with no remote
+/// side is merged as it is (`git merge <branch>`).
+fn pull_into_current(dir: &Path, name: &str, remote_row: bool, tx: &Sender<Msg>) -> Result<String, String> {
     let current = run_git(dir, &["symbolic-ref", "--short", "HEAD"])
         .map_err(|_| "HEAD is detached: check out a branch first".to_string())?;
     if current == name {
-        return Err(format!("{name} is the branch you're on: pick another one to merge"));
+        return Err(format!("{name} is the branch you're on: use p to pull it"));
     }
-
-    let config = |key: &str| run_git(dir, &["config", "--get", &format!("branch.{name}.{key}")]).ok();
-    if let (Some(remote), Some(merge)) = (config("remote"), config("merge")) {
-        let target = format!("{remote}/{}", merge.trim_start_matches("refs/heads/"));
-        let _ = tx.send(Msg::Progress(format!("Updating {name} from {target}…")));
-        fast_forward(dir, name, &remote, &merge).map_err(|e| {
-            if e == DIVERGED {
-                format!("{name} has diverged from {target}: check it out and pull first")
-            } else {
-                format!("Could not update {name}: {e}")
+    match remote_side(dir, name, remote_row) {
+        Some((remote, branch)) => {
+            let _ = tx.send(Msg::Progress(format!("Pulling {remote}/{branch} into {current}…")));
+            let mut args = vec!["pull"];
+            args.extend(merge_by_default(dir));
+            args.extend([remote.as_str(), branch.as_str()]);
+            let out = run_git(dir, &args)?;
+            if out.contains("Already up to date") {
+                return Ok(format!("{current} is already up to date with {remote}/{branch}"));
             }
-        })?;
+            Ok(format!("Pulled {remote}/{branch} into {current}"))
+        }
+        None => {
+            let _ = tx.send(Msg::Progress(format!("Merging {name} into {current}…")));
+            let out = run_git(dir, &["merge", name])?;
+            if out.contains("Already up to date") {
+                return Ok(format!("{current} already has everything from {name}"));
+            }
+            Ok(format!("Merged {name} into {current}"))
+        }
     }
+}
 
-    let _ = tx.send(Msg::Progress(format!("Merging {name} into {current}…")));
-    let out = run_git(dir, &["merge", name])?;
-    if out.contains("Already up to date") {
-        return Ok(format!("{current} already has everything from {name}"));
-    }
-    Ok(format!("Merged {name} into {current}"))
+/// Creates `name` and switches to it. It starts from the remote side of
+/// `from`, fetched first, so a new branch off `qa` starts from the latest
+/// `origin/qa` even if the local `qa` is behind. The new branch doesn't track
+/// `from`; the first push sets its own upstream.
+fn new_branch(dir: &Path, name: &str, from: &str, from_remote: bool, tx: &Sender<Msg>) -> Result<String, String> {
+    let base = match remote_side(dir, from, from_remote) {
+        Some((remote, branch)) => {
+            let _ = tx.send(Msg::Progress(format!("Fetching {remote}/{branch}…")));
+            run_git(dir, &["fetch", &remote, &branch])
+                .map_err(|e| format!("Could not update {remote}/{branch}: {e}"))?;
+            format!("{remote}/{branch}")
+        }
+        None => from.to_string(),
+    };
+    let _ = tx.send(Msg::Progress(format!("Creating {name} from {base}…")));
+    run_git(dir, &["switch", "--no-track", "-c", name, &base])?;
+    Ok(format!("Created {name} from {base}"))
 }
 
 /// Throws away changes. Files `HEAD` has go back to it, in the index and on
@@ -640,6 +690,10 @@ fn friendly(line: &str) -> String {
     let l = line.to_lowercase();
     if l.contains("[rejected]") && (l.contains("fetch first") || l.contains("non-fast-forward")) {
         "Push rejected: the remote has new commits, pull first".into()
+    } else if l.contains("is not a valid branch name") {
+        "That isn't a valid branch name".into()
+    } else if l.contains("already exists") && l.contains("branch") {
+        "A branch with that name already exists".into()
     } else if l.contains("not fully merged") {
         "This branch has commits that aren't merged anywhere: press D to delete it anyway".into()
     } else if l.contains("would be overwritten by") {
