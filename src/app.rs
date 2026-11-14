@@ -99,8 +99,9 @@ struct App {
     dragging: bool,
     /// A short message in the footer (errors, mostly) and when it goes away.
     flash: Option<Flash>,
-    /// The commit message being typed (`c`), while the box is open.
-    commit_box: Option<String>,
+    /// The text box in the footer, while it's open: a commit message (`c`) or
+    /// a new branch name (`n`).
+    input: Option<InputBox>,
     /// A discard (`d`) waiting for `y`.
     confirm: Option<Confirm>,
     /// A commit in progress, and what it's doing.
@@ -158,7 +159,7 @@ pub fn run(cwd: PathBuf) -> std::io::Result<()> {
         areas: Areas::default(),
         dragging: false,
         flash: None,
-        commit_box: None,
+        input: None,
         confirm: None,
         busy: None,
         busy_branch: None,
@@ -240,8 +241,8 @@ impl App {
                         Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
                         Event::Mouse(m) => self.on_mouse(m),
                         Event::Paste(text) => {
-                            if let Some(msg) = self.commit_box.as_mut() {
-                                msg.push_str(&text.replace(['\n', '\r'], " "));
+                            if let Some(input) = self.input.as_mut() {
+                                input.text.push_str(&text.replace(['\n', '\r'], " "));
                             }
                         }
                         _ => {}
@@ -515,8 +516,8 @@ impl App {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
-        if self.commit_box.is_some() {
-            self.on_commit_key(k);
+        if self.input.is_some() {
+            self.on_input_key(k);
             return;
         }
         // A pending confirmation: `y` goes ahead, any other key cancels.
@@ -617,6 +618,7 @@ impl App {
             KeyCode::Char('p') => self.pull_selected(),
             KeyCode::Char('m') => self.merge_selected(),
             KeyCode::Char('d') => self.ask_delete_branch(false),
+            KeyCode::Char('n') => self.open_new_branch_box(),
             KeyCode::Char('f') => self.fetch(),
             KeyCode::Char('D') => self.ask_delete_branch(true),
             KeyCode::Char('r') => {
@@ -705,12 +707,23 @@ impl App {
         }
         let Some(b) = self.selected_branch() else { return };
         if b.current {
-            self.flash = Some(Flash::new(format!("{} is the branch you're on: pick another one to merge", b.name), false));
+            self.flash = Some(Flash::new(format!("{} is the branch you're on: use p to pull it", b.name), false));
             return;
         }
-        let name = b.name.clone();
-        self.start_busy(format!("Merging {name}…"), Some((name.clone(), "merging")));
-        let _ = self.jobs.send(Job::Merge { name });
+        let (name, remote) = (b.name.clone(), b.remote);
+        self.start_busy(format!("Pulling {name} into the current branch…"), Some((name.clone(), "pulling into current")));
+        let _ = self.jobs.send(Job::PullInto { name, remote });
+    }
+
+    /// `n`: name a new branch that starts from the selected one.
+    fn open_new_branch_box(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some(b) = self.selected_branch() else { return };
+        let kind = InputKind::NewBranch { from: b.name.clone(), from_remote: b.remote };
+        self.flash = None;
+        self.input = Some(InputBox { kind, text: String::new() });
     }
 
     fn pull_selected(&mut self) {
@@ -824,24 +837,36 @@ impl App {
             return;
         }
         self.flash = None;
-        self.commit_box = Some(String::new());
+        self.input = Some(InputBox { kind: InputKind::Commit, text: String::new() });
     }
 
-    /// Typing in the commit box. Enter commits, Esc cancels.
-    fn on_commit_key(&mut self, k: KeyEvent) {
-        let Some(msg) = self.commit_box.as_mut() else { return };
+    /// Typing in the footer box. Enter commits (or creates the branch), Esc
+    /// cancels.
+    fn on_input_key(&mut self, k: KeyEvent) {
+        let Some(input) = self.input.as_mut() else { return };
+        let msg = &mut input.text;
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
-            KeyCode::Esc => self.commit_box = None,
-            KeyCode::Char('c') if ctrl => self.commit_box = None,
+            KeyCode::Esc => self.input = None,
+            KeyCode::Char('c') if ctrl => self.input = None,
             KeyCode::Enter => {
-                let message = msg.trim().to_string();
-                if message.is_empty() {
+                let text = msg.trim().to_string();
+                if text.is_empty() {
                     return;
                 }
-                self.commit_box = None;
-                self.start_busy("Committing…".into(), None);
-                let _ = self.jobs.send(Job::Commit { message });
+                let Some(input) = self.input.take() else { return };
+                match input.kind {
+                    InputKind::Commit => {
+                        self.start_busy("Committing…".into(), None);
+                        let _ = self.jobs.send(Job::Commit { message: text });
+                    }
+                    InputKind::NewBranch { from, from_remote } => {
+                        // Branch names can't have spaces: `fix login` → `fix-login`.
+                        let name = text.split_whitespace().collect::<Vec<_>>().join("-");
+                        self.start_busy(format!("Creating {name}…"), Some((from.clone(), "branching off")));
+                        let _ = self.jobs.send(Job::NewBranch { name, from, from_remote });
+                    }
+                }
             }
             KeyCode::Backspace if k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
                 delete_word(msg);
@@ -974,7 +999,7 @@ impl App {
     /// A blank row above the footer while the commit box is open, so it doesn't
     /// sit right against the diff.
     fn footer_gap(&self) -> u16 {
-        u16::from(self.commit_box.is_some())
+        u16::from(self.input.is_some())
     }
 
     /// Tree on top, diff below.
@@ -1527,8 +1552,8 @@ impl App {
         let mut x = area.x + 1;
         let right = area.x + area.width;
 
-        if let Some(msg) = &self.commit_box {
-            return Some(self.draw_commit_box(buf, area, y, msg));
+        if let Some(input) = &self.input {
+            return Some(self.draw_input_box(buf, area, y, input));
         }
         if let Some(c) = &self.confirm {
             let red = Style::new().fg(p.red);
@@ -1570,7 +1595,8 @@ impl App {
                 ("space", "checkout"),
                 ("p", "pull"),
                 ("P", "push"),
-                ("m", "merge into current"),
+                ("m", "pull into current"),
+                ("n", "new branch"),
                 ("d", "delete"),
                 ("f", "fetch"),
                 ("⏎", "history"),
@@ -1585,12 +1611,16 @@ impl App {
         None
     }
 
-    fn draw_commit_box(&self, buf: &mut Buffer, area: Rect, y: u16, msg: &str) -> (u16, u16) {
+    fn draw_input_box(&self, buf: &mut Buffer, area: Rect, y: u16, input: &InputBox) -> (u16, u16) {
         let p = &self.pal;
         let right = area.x + area.width - 1;
+        let msg = input.text.as_str();
+        let (label, placeholder, action) = match &input.kind {
+            InputKind::Commit => ("Commit ", "Commit message".to_string(), "commit"),
+            InputKind::NewBranch { from, .. } => ("New branch ", format!("name (from {from})"), "create"),
+        };
 
-        // Hints on the right, shortened when the pane is narrow.
-        let hints: &[(&str, &str)] = &[("⏎", "commit"), ("esc", "cancel")];
+        let hints: &[(&str, &str)] = &[("⏎", action), ("esc", "cancel")];
         let hints_w: u16 = hints
             .iter()
             .map(|(k, w)| (k.width() + if w.is_empty() { 0 } else { w.width() + 1 } + 2) as u16)
@@ -1606,7 +1636,7 @@ impl App {
         }
 
         let mut x = area.x + 1;
-        put(buf, &mut x, y, field_end, "Commit ", Style::new().add_modifier(Modifier::BOLD));
+        put(buf, &mut x, y, field_end, label, Style::new().add_modifier(Modifier::BOLD));
         let field_start = x;
         let field_w = field_end.saturating_sub(field_start);
         buf.set_style(Rect::new(field_start, y, field_w, 1), Style::new().bg(p.pill_bg));
@@ -1614,7 +1644,7 @@ impl App {
         let inner = field_w.saturating_sub(2) as usize;
         let mut tx = field_start + 1;
         if msg.is_empty() {
-            put(buf, &mut tx, y, field_end, "Commit message", Style::new().fg(p.faint).bg(p.pill_bg));
+            put(buf, &mut tx, y, field_end, &placeholder, Style::new().fg(p.faint).bg(p.pill_bg));
             return (field_start + 1, y);
         }
         // Show the end of the message when it doesn't fit.
@@ -1627,6 +1657,18 @@ impl App {
         put(buf, &mut tx, y, field_end, shown, Style::new().bg(p.pill_bg));
         (tx, y)
     }
+}
+
+/// The text box in the footer.
+struct InputBox {
+    kind: InputKind,
+    text: String,
+}
+
+enum InputKind {
+    Commit,
+    /// A new branch starting from `from` (an `origin/x` row when `from_remote`).
+    NewBranch { from: String, from_remote: bool },
 }
 
 /// Something destructive waiting for `y` in the footer: discarding changes
