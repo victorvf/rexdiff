@@ -37,7 +37,8 @@ On the Branches screen:
   Enter           commit history of the branch (Esc goes back)
   p               pull the branch (current: git pull; others: fast-forward only)
   P (Shift+P)     push the branch (to its upstream, or `origin` with -u)
-  m               update the branch from its upstream, then merge it into the current one
+  m               pull the branch into the current one (git pull origin <branch>)
+  n               create a new branch from the selected one (from its remote side, freshly fetched)
   d / D           delete the local branch (y confirms); D deletes it even if it isn't merged
   f               fetch from all remotes (git fetch --all --prune)
   Esc / 1         back to Changes
