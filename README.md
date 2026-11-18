@@ -114,6 +114,10 @@ close it. The action also shows up in the command palette as
 Rex matches keys without Shift applied, so `?` is written as `alt+shift+/`.
 Change the key in the last line of the file if you prefer another one.
 
+To have the shortcut open rexdiff as a floating pane centered over the window
+instead of next to your pane, add `"--float"` to the `rexdiff` command in that
+file (and `"--size", "80"` for another size than 70%).
+
 ## Usage
 
 From any Rex terminal inside a git repository:
@@ -125,6 +129,8 @@ rexdiff toggle          # open or close it
 rexdiff --ratio 35      # narrower panel
 rexdiff --below         # open below instead of to the right
 rexdiff --focus         # focus the panel when it opens
+rexdiff --float         # open it as a floating pane centered over the window (70%)
+rexdiff --float --size 80   # a bigger floating pane
 rexdiff view            # run the panel in the current terminal
 rexdiff help
 ```

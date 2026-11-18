@@ -5,7 +5,7 @@ mod theme;
 mod tree;
 mod wrap;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const HELP: &str = "\
@@ -17,6 +17,8 @@ Usage:
   rexdiff toggle                           open or close it
       --cwd DIR                            use another folder (accepts file://…)
       --focus                              focus the panel when it opens
+      --float                              open it as a floating pane centered over the window
+      --size PCT                           size of the floating pane (default: 70%)
   rexdiff view                             run the panel in the current terminal
 
 In the panel:
@@ -175,11 +177,18 @@ fn show(args: &[String]) -> Result<(), String> {
     let mut ratio = "45".to_string();
     let mut dir = "right";
     let mut focus = false;
+    let mut float = false;
+    let mut size: u32 = 70;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--below" => dir = "below",
             "--focus" => focus = true,
+            "--float" => float = true,
+            "--size" => {
+                let v = it.next().ok_or("--size needs a percentage")?;
+                size = v.parse().map_err(|_| format!("--size needs a percentage, got {v}"))?;
+            }
             "--ratio" => ratio = it.next().cloned().ok_or("--ratio needs a number")?,
             s if s.starts_with("--ratio=") => ratio = s["--ratio=".len()..].to_string(),
             "--cwd" => {
@@ -200,6 +209,21 @@ fn show(args: &[String]) -> Result<(), String> {
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let id = if float {
+        open_floating(&ctx, &exe, &cwd, size, focus)?
+    } else {
+        open_split(&ctx, &exe, &cwd, dir, &ratio, focus)?
+    };
+    let file = state_file(&ctx.block);
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(file, id);
+    Ok(())
+}
+
+/// The panel in a new pane next to the current one (`rex split`).
+fn open_split(ctx: &RexCtx, exe: &Path, cwd: &Path, dir: &str, ratio: &str, focus: bool) -> Result<String, String> {
     let out = rex()
         .args(["split", "-s", &ctx.session, "-b", &ctx.block, "--split", dir, "--ratio", &ratio])
         .arg(if focus { "--focus=true" } else { "--focus=false" })
@@ -215,13 +239,42 @@ fn show(args: &[String]) -> Result<(), String> {
     }
     let json: serde_json::Value =
         serde_json::from_slice(&out.stdout).map_err(|e| format!("unexpected response from rex: {e}"))?;
-    let id = json["block_ids"][0].as_str().ok_or("rex did not return the pane id")?;
-    let file = state_file(&ctx.block);
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    Ok(json["block_ids"][0].as_str().ok_or("rex did not return the pane id")?.to_string())
+}
+
+/// The panel in a floating pane centered over the current window, `size`
+/// percent of its width and height (`session.new_layer`).
+fn open_floating(ctx: &RexCtx, exe: &Path, cwd: &Path, size: u32, focus: bool) -> Result<String, String> {
+    let inspect = rex()
+        .args(["block", "inspect", "-s", &ctx.session, &ctx.block, "--json"])
+        .output()
+        .map_err(|e| format!("could not run `rex`: {e}"))?;
+    let info: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).map_err(|e| format!("unexpected response from rex: {e}"))?;
+    let window = info["block"]["window_id"].as_str().ok_or("could not find this pane's window")?;
+
+    let s = f64::from(size.clamp(20, 100)) / 100.0;
+    let m = (1.0 - s) / 2.0;
+    let request = serde_json::json!({
+        "window_id": window,
+        "bounds": [m, m, s, s],
+        "focus": focus,
+        "layout": { "block": {
+            "flavor": "com.superlogical.terminal.shell",
+            "label": "rexdiff",
+            "options": { "command": [exe, "view"], "cwd": cwd },
+        }},
+    });
+    let out = rex()
+        .args(["api", "call", "-s", &ctx.session, "session.new_layer", &request.to_string()])
+        .output()
+        .map_err(|e| format!("could not run `rex`: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let _ = std::fs::write(file, id);
-    Ok(())
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("unexpected response from rex: {e}"))?;
+    Ok(json["block_ids"][0].as_str().ok_or("rex did not return the pane id")?.to_string())
 }
 
 /// Closes the panel. Returns `true` if one was open.
