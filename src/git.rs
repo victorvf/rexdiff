@@ -81,7 +81,9 @@ pub enum Job {
     Refresh,
     Diff { path: String, context: u32 },
     /// `git add` the file (`true`) or take it back out of the index (`false`).
-    Stage { path: String, add: bool },
+    /// One file, a folder's files, or all of them in one go; `label` names
+    /// them in an error message.
+    Stage { paths: Vec<String>, add: bool, label: String },
     /// `git commit -m message`.
     Commit { message: String },
     /// Throw away changes: `restore` paths go back to `HEAD` (index and disk),
@@ -182,7 +184,7 @@ pub fn run_worker(cwd: PathBuf, rx: Receiver<Job>, tx: Sender<Msg>) {
                 }
                 Job::Refresh => refresh = true,
                 Job::Diff { path, context } => diff_job = Some((path, context)),
-                Job::Stage { path, add } => stage_jobs.push((path, add)),
+                Job::Stage { paths, add, label } => stage_jobs.push((paths, add, label)),
                 Job::Commit { message } => commit_job = Some(message),
             }
         }
@@ -195,9 +197,10 @@ pub fn run_worker(cwd: PathBuf, rx: Receiver<Job>, tx: Sender<Msg>) {
             continue;
         };
 
-        for (path, add) in stage_jobs {
-            if let Err(e) = stage(r, &path, add) {
-                let _ = tx.send(Msg::Error(format!("Could not {} {path}: {}", if add { "stage" } else { "unstage" }, e.message())));
+        for (paths, add, label) in stage_jobs {
+            if let Err(e) = stage(r, &paths, add) {
+                let verb = if add { "stage" } else { "unstage" };
+                let _ = tx.send(Msg::Error(format!("Could not {verb} {label}: {}", e.message())));
             }
             refresh = true;
         }
@@ -712,23 +715,29 @@ fn friendly(line: &str) -> String {
 }
 
 /// `git add <path>` / `git restore --staged <path>`.
-fn stage(repo: &Repository, path: &str, add: bool) -> Result<(), git2::Error> {
+/// `git add <paths>` / `git restore --staged <paths>`, writing the index once.
+fn stage(repo: &Repository, paths: &[String], add: bool) -> Result<(), git2::Error> {
+    if paths.is_empty() {
+        return Ok(());
+    }
     if add {
         let mut idx = repo.index()?;
         idx.read(false)?;
-        let on_disk = repo.workdir().is_some_and(|w| w.join(path).symlink_metadata().is_ok());
-        if on_disk {
-            idx.add_path(Path::new(path))?;
-        } else {
-            // Deleted file: staging it means removing it from the index.
-            idx.remove_path(Path::new(path))?;
+        for path in paths {
+            let on_disk = repo.workdir().is_some_and(|w| w.join(path).symlink_metadata().is_ok());
+            if on_disk {
+                idx.add_path(Path::new(path))?;
+            } else {
+                // Deleted file: staging it means removing it from the index.
+                idx.remove_path(Path::new(path))?;
+            }
         }
         idx.write()
     } else {
         // Put the HEAD version back in the index (or drop the entry for a file
         // HEAD doesn't have, including in a repository without commits).
         let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-        repo.reset_default(head.as_ref().map(|c| c.as_object()), [path])
+        repo.reset_default(head.as_ref().map(|c| c.as_object()), paths)
     }
 }
 

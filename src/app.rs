@@ -507,7 +507,42 @@ impl App {
     fn toggle_stage(&mut self, idx: usize) {
         let Some(f) = self.files().get(idx) else { return };
         let add = f.staged != Staged::Fully;
-        let _ = self.jobs.send(Job::Stage { path: f.path.clone(), add });
+        let path = f.path.clone();
+        let _ = self.jobs.send(Job::Stage { paths: vec![path.clone()], add, label: path });
+    }
+
+    /// `a`: stage every file in the folder under the cursor (a file's own
+    /// folder when the cursor is on a file). `all` (`A`) does every changed
+    /// file. When they're all staged already, it unstages them instead.
+    fn toggle_stage_group(&mut self, all: bool) {
+        let files = self.files();
+        let folder = match self.rows.get(self.cursor).map(|r| &r.item) {
+            _ if all => None,
+            Some(Item::Dir { path, .. }) => Some(path.clone()),
+            Some(Item::File { idx, .. }) => files[*idx].path.rsplit_once('/').map(|(dir, _)| dir.to_string()),
+            None => return,
+        };
+        let picked: Vec<&git::FileEntry> = match &folder {
+            Some(dir) => {
+                let prefix = format!("{dir}/");
+                files.iter().filter(|f| f.path.starts_with(&prefix)).collect()
+            }
+            // `A`, or a file at the top of the repository: everything.
+            None => files.iter().collect(),
+        };
+        if picked.is_empty() {
+            return;
+        }
+        let add = !picked.iter().all(|f| f.staged == Staged::Fully);
+        let paths: Vec<String> = picked.iter().map(|f| f.path.clone()).collect();
+        let n = paths.len();
+        let label = match &folder {
+            Some(dir) => format!("{dir}/ ({n} files)"),
+            None => format!("all {n} files"),
+        };
+        let verb = if add { "Staged" } else { "Unstaged" };
+        self.flash = Some(Flash::new(format!("{verb} {label}"), true));
+        let _ = self.jobs.send(Job::Stage { paths, add, label });
     }
 
     fn scroll_diff(&mut self, delta: isize) {
@@ -544,6 +579,8 @@ impl App {
         let page = self.areas.diff.height.max(2) as isize - 1;
         match k.code {
             KeyCode::Char('c') if !ctrl => self.open_commit_box(),
+            KeyCode::Char('a') if !ctrl => self.toggle_stage_group(false),
+            KeyCode::Char('A') => self.toggle_stage_group(true),
             KeyCode::Char('d') if !ctrl => self.ask_discard(),
             KeyCode::Char('d') if ctrl => self.scroll_diff(page / 2),
             KeyCode::Char('u') if ctrl => self.scroll_diff(-page / 2),
@@ -1583,6 +1620,7 @@ impl App {
                 ("↑↓", "navigate"),
                 ("←→", "folders"),
                 ("space", "stage/fold"),
+                ("a", "stage folder"),
                 ("c", "commit"),
                 ("d", "discard"),
                 ("x", "whole file"),

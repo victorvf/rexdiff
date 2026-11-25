@@ -28,6 +28,8 @@ In the panel:
   Tab / Shift-Tab next / previous file, wrapping around
   f / b           scroll the diff one page   J K  one line   g / G  top / bottom
   x               toggle between changed hunks only and the whole file
+  a / A           stage the folder under the cursor (on a file, its folder) / every file;
+                  again, when they're all staged, to unstage them
   c               commit what's staged: type the message, Enter commits, Esc cancels
   d               discard the changes of the file or folder under the cursor (y confirms)
   1 / 2           Changes / Branches screen
