@@ -44,7 +44,7 @@ left and the diff on the right.
   one row (`src/components/ui/`), each file shows its status (`A`, `M`, `D`)
   and `+N −N`, and folders add up their files.
 - **Mark files as reviewed.** Press space on a file to `git add` it, and again
-  to unstage it. Each file shows `✓` (staged), `◐` (staged, then changed
+  to unstage it; `a` does a whole folder and `A` everything. Each file shows `✓` (staged), `◐` (staged, then changed
   again), or `○` (not staged); reviewed files fade, folders get a `✓` when
   everything in them is staged, and the header counts your progress.
 - **Discard what you don't want.** `d` on a file or folder throws its changes
@@ -149,6 +149,8 @@ does nothing.
 | `f` / `b`, `PgDn` / `PgUp` | Scroll the diff one page |
 | `J` / `K` | Scroll the diff one line |
 | `g` / `G` | Top / bottom of the diff |
+| `a` | Stage every file in the folder under the cursor (on a file, the folder it's in); press again to unstage them |
+| `A` (Shift+A) | Stage every changed file; press again to unstage them all |
 | `c` | Commit what's staged (see below) |
 | `d` | Discard the changes of the file or folder under the cursor (see below) |
 | `x` | Toggle between changed hunks only and the whole file |
