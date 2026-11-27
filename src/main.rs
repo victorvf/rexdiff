@@ -93,12 +93,31 @@ struct RexCtx {
     block: String,
 }
 
+/// Where we are in Rex. Newer Rex versions set only `REX_BLOCK`; the session
+/// then comes from `rex whoami`, which resolves it from the pane.
 fn rex_ctx() -> Result<RexCtx, String> {
     let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    match (get("REX_SESSION"), get("REX_BLOCK")) {
-        (Some(session), Some(block)) => Ok(RexCtx { session, block }),
-        _ => Err("run this inside a Rex terminal (REX_SESSION/REX_BLOCK are not set)".into()),
-    }
+    let block = get("REX_BLOCK").ok_or("run this inside a Rex terminal (REX_BLOCK is not set)")?;
+    let session = match get("REX_SESSION") {
+        Some(session) => session,
+        None => session_of(&block)?,
+    };
+    Ok(RexCtx { session, block })
+}
+
+/// The session that holds `block`, from `rex whoami --json`.
+fn session_of(block: &str) -> Result<String, String> {
+    let out = rex()
+        .args(["whoami", "--json"])
+        .env("REX_BLOCK", block)
+        .output()
+        .map_err(|e| format!("could not run `rex`: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("unexpected response from rex whoami: {e}"))?;
+    json["session_id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "could not find this pane's Rex session (rex whoami)".to_string())
 }
 
 /// File that records which rexdiff pane belongs to this terminal.
